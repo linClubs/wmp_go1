@@ -35,3 +35,11 @@ from .a1.a1_amp_config import A1AMPCfg, A1AMPCfgPPO
 from .base.legged_robot import LeggedRobot
 
 task_registry.register( "a1_amp", LeggedRobot, A1AMPCfg(), A1AMPCfgPPO())
+
+
+from .go1.go1_amp_config import RobotAMPCfg, RobotAMPCfgPPO
+task_registry.register( "go1", LeggedRobot, RobotAMPCfg(), RobotAMPCfgPPO())
+
+
+from .go2.robot_amp_config import RobotAMPCfg, RobotAMPCfgPPO
+task_registry.register( "go2", LeggedRobot, RobotAMPCfg(), RobotAMPCfgPPO())

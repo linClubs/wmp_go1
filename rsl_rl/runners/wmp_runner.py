@@ -64,6 +64,9 @@ class WMPRunner:
         self.depth_predictor_cfg = train_cfg["depth_predictor"]
         self.device = device
         self.env = env
+        self.use_depth_predictor = self.depth_predictor_cfg.get("use_depth_predictor", True)
+        if self.env.cfg.depth.use_camera and not self.use_depth_predictor and self.env.cfg.depth.camera_num_envs < self.env.num_envs:
+            raise ValueError("Disabling the depth predictor requires cameras for all environments")
         self.history_length = history_length
         if self.env.num_privileged_obs is not None:
             num_critic_obs = self.env.num_privileged_obs
@@ -230,9 +233,15 @@ class WMPRunner:
                     # 按相机更新频率保存世界模型和深度预测器训练样本
                     if self.env.global_counter % self.wm_update_interval == 0:
                         if self.env.cfg.depth.use_camera:
-                            forward_heightmap = self.env.get_forward_map().to(self._world_model.device)
-                            wm_obs["image"] = self.depth_predictor(forward_heightmap, wm_obs["prop"])
-                            self.wm_buffer["forward_height_map"][range(self.env.num_envs), self.wm_buffer_index, :] = forward_heightmap.to('cpu')
+                            if self.use_depth_predictor:
+                                forward_heightmap = self.env.get_forward_map().to(self._world_model.device)
+                                wm_obs["image"] = self.depth_predictor(forward_heightmap, wm_obs["prop"])
+                                self.wm_buffer["forward_height_map"][range(self.env.num_envs), self.wm_buffer_index, :] = forward_heightmap.to('cpu')
+                            else:
+                                # 按环境编号填入相机图像，兼容相机索引顺序。
+                                wm_obs["image"] = torch.empty(
+                                    (self.env.num_envs,) + self.env.cfg.depth.resized + (1,), device=self._world_model.device
+                                )
                             wm_obs["image"][self.env.depth_index] = infos["depth"].unsqueeze(-1).to(self._world_model.device)
                             self.wm_buffer["image"][range(self.env.cfg.depth.camera_num_envs), self.wm_buffer_index[self.env.depth_index], :] = wm_obs["image"][self.env.depth_index].to('cpu')
                         not_reset_env_ids = (1 - wm_is_first).nonzero(as_tuple=False).flatten().cpu().numpy()
@@ -287,19 +296,37 @@ class WMPRunner:
                 self.save(os.path.join(self.log_dir, 'model_{}.pt'.format(it)))
             ep_infos.clear()
 
-            start_time = time.time()
             if sum_wm_dataset_size > self.wm_config.train_start_steps:
-                if it % self.depth_predictor_cfg["training_interval"] == 0:
+                training_device = torch.device(self._world_model.device)
+
+                def training_timestamp():
+                    # 等待设备完成计算，避免异步 CUDA 工作被计入下一阶段。
+                    if training_device.type == "cuda":
+                        torch.cuda.synchronize(training_device)
+                    return time.perf_counter()
+
+                if not self.use_depth_predictor:
+                    print("Depth predictor training: skipped (depth prediction not required)", flush=True)
+                elif it % self.depth_predictor_cfg["training_interval"] == 0:
                     # 训练深度预测器
+                    start_time = training_timestamp()
                     depth_mse_loss = self.train_depth_predictor()
+                    depth_training_time = training_timestamp() - start_time
+                    print(f"Depth predictor training time: {depth_training_time:.3f}s", flush=True)
                     if depth_mse_loss is not None:
                         self.writer.add_scalar('DepthPredictor/loss', depth_mse_loss, it)
+                else:
+                    print("Depth predictor training: skipped (training interval)", flush=True)
 
                 # 训练世界模型
+                start_time = training_timestamp()
                 wm_metrics = self.train_world_model()
+                world_model_training_time = training_timestamp() - start_time
+                print(f"World model training time: {world_model_training_time:.3f}s", flush=True)
                 for name, values in wm_metrics.items():
                     self.writer.add_scalar('World_model/' + name, float(np.mean(values)), it)
-            print('training world model time:', time.time() - start_time)
+            else:
+                print("Depth predictor and world model training: skipped (insufficient data)", flush=True)
 
             # 保存训练配置
             if it == 0:
@@ -320,6 +347,7 @@ class WMPRunner:
         }
         if self.env.cfg.depth.use_camera:
             self.wm_dataset["image"] = torch.zeros((self.env.cfg.depth.camera_num_envs, wm_capacity) + self.env.cfg.depth.resized + (1,), device=self._world_model.device)
+        if self.use_depth_predictor:
             self.wm_dataset["forward_height_map"] = torch.zeros((self.env.num_envs, wm_capacity, self.env.cfg.env.forward_height_dim), device=self._world_model.device)
 
         self.wm_dataset_size = np.zeros(self.env.num_envs)
@@ -332,11 +360,14 @@ class WMPRunner:
         }
         if self.env.cfg.depth.use_camera:
             self.wm_buffer["image"] = torch.zeros((self.env.cfg.depth.camera_num_envs, wm_capacity) + self.env.cfg.depth.resized + (1,), device='cpu')
+        if self.use_depth_predictor:
             self.wm_buffer["forward_height_map"] = torch.zeros((self.env.num_envs, wm_capacity, self.env.cfg.env.forward_height_dim), device='cpu')
 
         self.wm_buffer_index = np.zeros(self.env.num_envs)
 
     def train_depth_predictor(self):
+        if not self.use_depth_predictor:
+            return None
         # 仅从已有有效样本的相机环境采样；没有样本时跳过本次训练。
         candidate_env_ids = self.env.depth_index_without_tilt_stool_crawl
         valid_env_ids = candidate_env_ids[self.wm_dataset_size[candidate_env_ids] > 0]
@@ -406,31 +437,40 @@ class WMPRunner:
 
         ep_string = ''
         if locs['ep_infos']:
-            previous_group = None
+            episode_values = {}
             for key in locs['ep_infos'][0]:
-                if key.startswith('rew_'):
-                    group = 'Rewards'
-                elif key.startswith('reset_'):
-                    group = 'Resets'
-                elif key == 'terrain_level' or key.startswith('tl_'):
-                    group = 'Terrain curriculum'
-                else:
-                    group = 'Other episode info'
-                if group != previous_group:
-                    ep_string += f"{'-' * width}\n"
-                    previous_group = group
-
                 infotensor = torch.tensor([], device=self.device)
                 for ep_info in locs['ep_infos']:
-                    # 将标量和零维张量统一为一维张量
-                    if not isinstance(ep_info[key], torch.Tensor):
-                        ep_info[key] = torch.Tensor([ep_info[key]])
-                    if len(ep_info[key].shape) == 0:
-                        ep_info[key] = ep_info[key].unsqueeze(0)
-                    infotensor = torch.cat((infotensor, ep_info[key].to(self.device)))
+                    # 将标量和零维张量统一为一维张量。
+                    value = torch.as_tensor(ep_info[key], device=self.device).reshape(-1)
+                    infotensor = torch.cat((infotensor, value))
                 value = torch.mean(infotensor)
                 self.writer.add_scalar('Episode/' + key, value, locs['it'])
-                ep_string += f"""{f'Mean episode {key}:':>{pad}} {value:.4f}\n"""
+                episode_values[key] = value.item()
+
+            # 按参考日志的六组顺序输出，各组内部按数值升序排列。
+            groups = {name: [] for name in ('Rewards', 'Metrics', 'Curriculum', 'Terminations', 'Other metrics', 'Other episode info')}
+            for key, value in sorted(episode_values.items(), key=lambda item: item[1]):
+                if key.startswith('rew_') or '_Reward/' in key:
+                    group = 'Rewards'
+                elif 'Metrics/' in key:
+                    group = 'Metrics'
+                elif key == 'terrain_level' or key.startswith('tl_') or 'Curriculum/' in key:
+                    group = 'Curriculum'
+                elif key.startswith('reset_') or '_Termination' in key:
+                    group = 'Terminations'
+                elif '/' in key:
+                    group = 'Other metrics'
+                else:
+                    group = 'Other episode info'
+                groups[group].append((key, value))
+            for group, entries in groups.items():
+                if not entries:
+                    continue
+                ep_string += f"{'-' * width}\n"
+                for key, value in entries:
+                    formatted_value = f"{value:+.4f}" if group == 'Rewards' else f"{value:.4f}"
+                    ep_string += f"{f'Mean episode {key}:':>{pad}} {formatted_value}\n"
         mean_std = self.alg.actor_critic.std.mean()
         fps = int(self.num_steps_per_env * self.env.num_envs / (locs['collection_time'] + locs['learn_time']))
 

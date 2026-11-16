@@ -25,7 +25,6 @@ import logging
 
 import torch
 import numpy as np
-from pybullet_utils import transformations
 
 from rsl_rl.utils import utils
 from rsl_rl.datasets import pose3d
@@ -270,7 +269,7 @@ class AMPLoader:
         blend = torch.tensor(p * n - idx_low, device=self.device, dtype=torch.float32).unsqueeze(-1)
 
         pos_blend = self.slerp(all_frame_pos_starts, all_frame_pos_ends, blend)
-        rot_blend = utils.quaternion_slerp(all_frame_rot_starts, all_frame_rot_ends, blend)
+        rot_blend = motion_util.standardize_quaternion(utils.quaternion_slerp(all_frame_rot_starts, all_frame_rot_ends, blend))
         amp_blend = self.slerp(all_frame_amp_starts, all_frame_amp_ends, blend)
         return torch.cat([pos_blend, rot_blend, amp_blend], dim=-1)
 
@@ -317,11 +316,8 @@ class AMPLoader:
         joint_vel_0, joint_vel_1 = AMPLoader.get_joint_vel(frame0), AMPLoader.get_joint_vel(frame1)
 
         blend_root_pos = self.slerp(root_pos0, root_pos1, blend)
-        blend_root_rot = transformations.quaternion_slerp(
-            root_rot0.cpu().numpy(), root_rot1.cpu().numpy(), blend)
-        blend_root_rot = torch.tensor(
-            motion_util.standardize_quaternion(blend_root_rot),
-            dtype=torch.float32, device=self.device)
+
+        blend_root_rot = motion_util.standardize_quaternion(utils.quaternion_slerp(root_rot0, root_rot1, blend))
         blend_joints = self.slerp(joints0, joints1, blend)
         blend_tar_toe_pos = self.slerp(tar_toe_pos_0, tar_toe_pos_1, blend)
         blend_linear_vel = self.slerp(linear_vel_0, linear_vel_1, blend)

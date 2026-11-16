@@ -37,8 +37,6 @@ import subprocess
 import torch
 import numpy as np
 
-_EPS = np.finfo(float).eps * 4.0
-
 def git_store_code_state(log_dir, repo_dir=None):
     if log_dir is None:
         return
@@ -212,36 +210,30 @@ class Normalize(torch.nn.Module):
 
 
 def quaternion_slerp(q0, q1, fraction, spin=0, shortestpath=True):
-    """Batch quaternion spherical linear interpolation."""
+    """对 [x, y, z, w] 四元数做球面插值，支持单个和批量输入且不修改输入。
 
-    out = torch.zeros_like(q0)
-
-    zero_mask = torch.isclose(fraction, torch.zeros_like(fraction)).squeeze()
-    ones_mask = torch.isclose(fraction, torch.ones_like(fraction)).squeeze()
-    out[zero_mask] = q0[zero_mask]
-    out[ones_mask] = q1[ones_mask]
-
-    d = torch.sum(q0 * q1, dim=-1, keepdim=True)
-    dist_mask = (torch.abs(torch.abs(d) - 1.0) < _EPS).squeeze()
-    out[dist_mask] = q0[dist_mask]
-
+    fraction 可为标量、批量形状或批量形状加末尾单维。
+    非最短路径下，互为相反数的四元数沿用起始姿态。
+    """
+    q0, q1 = torch.broadcast_tensors(q0, q1)
+    q0 = torch.nn.functional.normalize(q0, dim=-1)
+    q1 = torch.nn.functional.normalize(q1, dim=-1)
+    fraction = torch.as_tensor(fraction, dtype=q0.dtype, device=q0.device)
+    if fraction.ndim == q0.ndim - 1:
+        fraction = fraction.unsqueeze(-1)
+    dot = (q0 * q1).sum(dim=-1, keepdim=True).clamp(-1., 1.)
     if shortestpath:
-        d_old = torch.clone(d)
-        d = torch.where(d_old < 0, -d, d)
-        q1 = torch.where(d_old < 0, -q1, q1)
-
-    angle = torch.acos(d) + spin * torch.pi
-    angle_mask = (torch.abs(angle) < _EPS).squeeze()
-    out[angle_mask] = q0[angle_mask]
-
-    final_mask = torch.logical_or(zero_mask, ones_mask)
-    final_mask = torch.logical_or(final_mask, dist_mask)
-    final_mask = torch.logical_or(final_mask, angle_mask)
-    final_mask = torch.logical_not(final_mask)
-
-    isin = 1.0 / angle
-    q0 *= torch.sin((1.0 - fraction) * angle) * isin
-    q1 *= torch.sin(fraction * angle) * isin
-    q0 += q1
-    out[final_mask] = q0[final_mask]
-    return out
+        q1 = torch.where(dot < 0, -q1, q1)
+        dot = dot.abs()
+    # 重合端点改用线性插值，避免 acos 端点和除零引起数值问题。
+    eps = torch.finfo(q0.dtype).eps * 4
+    coincident = dot.abs() >= 1 - eps
+    angle = torch.acos(dot.clamp(-1 + eps, 1 - eps)) + spin * torch.pi
+    sine = torch.sin(angle)
+    safe_sine = torch.where(sine.abs() < eps, torch.ones_like(sine), sine)
+    spherical = (torch.sin((1 - fraction) * angle) * q0 + torch.sin(fraction * angle) * q1) / safe_sine
+    linear = torch.nn.functional.normalize((1 - fraction) * q0 + fraction * q1, dim=-1)
+    fallback = torch.where(dot < 0, q0, linear)
+    result = torch.where(coincident | (sine.abs() < eps), fallback, spherical)
+    result = torch.where(fraction == 0, q0, result)
+    return torch.where(fraction == 1, q1, result)

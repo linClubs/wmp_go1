@@ -295,6 +295,7 @@ class A1AMPCfgPPO(LeggedRobotCfgPPO):
         min_normalized_std = [0.05, 0.02, 0.05] * 4
 
     class depth_predictor:
+        use_depth_predictor = True
         lr = 3e-4
         weight_decay = 1e-4
         training_interval = 1

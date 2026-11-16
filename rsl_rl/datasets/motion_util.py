@@ -13,85 +13,35 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""Utility functions for processing motion clips."""
-
-import os
-import inspect
-currentdir = os.path.dirname(os.path.abspath(inspect.getfile(inspect.currentframe())))
-parentdir = os.path.dirname(os.path.dirname(currentdir))
-os.sys.path.insert(0, parentdir)
-
-import numpy as np
+# Copyright (c) 2026-2027 zh
+"""内容：使用 Torch 处理动作片段的姿态标准化与航向。"""
+import torch
 
 from rsl_rl.datasets import pose3d
-from pybullet_utils import transformations
 
 
 def standardize_quaternion(q):
-  """Returns a quaternion where q.w >= 0 to remove redundancy due to q = -q.
-
-  Args:
-    q: A quaternion to be standardized.
-
-  Returns:
-    A quaternion with q.w >= 0.
-
-  """
-  if q[-1] < 0:
-    q = -q
-  return q
+    """将单个或批量四元数统一为 w >= 0，不修改输入。"""
+    q = pose3d.as_float_tensor(q)
+    return torch.where(q[..., 3:] < 0, -q, q)
 
 
 def normalize_rotation_angle(theta):
-  """Returns a rotation angle normalized between [-pi, pi].
-
-  Args:
-    theta: angle of rotation (radians).
-
-  Returns:
-    An angle of rotation normalized between [-pi, pi].
-
-  """
-  norm_theta = theta
-  if np.abs(norm_theta) > np.pi:
-    norm_theta = np.fmod(norm_theta, 2 * np.pi)
-    if norm_theta >= 0:
-      norm_theta += -2 * np.pi
-    else:
-      norm_theta += 2 * np.pi
-
-  return norm_theta
+    """将弧度角归一化到 [-π, π]，保留原有正负端点。"""
+    theta = pose3d.as_float_tensor(theta)
+    wrapped = torch.fmod(theta, 2 * torch.pi)
+    wrapped = torch.where(wrapped >= 0, wrapped - 2 * torch.pi, wrapped + 2 * torch.pi)
+    return torch.where(torch.abs(theta) > torch.pi, wrapped, theta)
 
 
 def calc_heading(q):
-  """Returns the heading of a rotation q, specified as a quaternion.
-
-  The heading represents the rotational component of q along the vertical
-  axis (z axis).
-
-  Args:
-    q: A quaternion that the heading is to be computed from.
-
-  Returns:
-    An angle representing the rotation about the z axis.
-
-  """
-  ref_dir = np.array([1, 0, 0])
-  rot_dir = pose3d.QuaternionRotatePoint(ref_dir, q)
-  heading = np.arctan2(rot_dir[1], rot_dir[0])
-  return heading
+    """计算旋转后的 x 轴在水平面上的航向角，支持批量输入。"""
+    rot_dir = pose3d.QuaternionRotatePoint([1., 0., 0.], q)
+    return torch.atan2(rot_dir[..., 1], rot_dir[..., 0])
 
 
 def calc_heading_rot(q):
-  """Return a quaternion representing the heading rotation of q along the vertical axis (z axis).
-
-  Args:
-    q: A quaternion that the heading is to be computed from.
-
-  Returns:
-    A quaternion representing the rotation about the z axis.
-
-  """
-  heading = calc_heading(q)
-  q_heading = transformations.quaternion_about_axis(heading, [0, 0, 1])
-  return q_heading
+    """计算绕 z 轴的航向四元数。"""
+    heading = calc_heading(q)
+    axis = heading.new_tensor([0., 0., 1.])
+    return pose3d.QuaternionFromAxisAngle(axis, heading)

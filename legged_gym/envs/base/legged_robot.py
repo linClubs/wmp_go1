@@ -43,7 +43,7 @@ import os
 from isaacgym.torch_utils import *
 from isaacgym import gymtorch, gymapi, gymutil
 
-import torch, torchvision
+import torch
 from torch import Tensor
 from typing import Tuple, Dict
 
@@ -53,6 +53,7 @@ from legged_gym.terrain_names import TERRAIN_NAMES
 from legged_gym.utils.terrain import Terrain
 from legged_gym.utils.math import quat_apply_yaw, wrap_to_pi, torch_rand_sqrt_float
 from legged_gym.utils.helpers import class_to_dict
+from legged_gym.utils.progress import waiting_progress
 from .legged_robot_config import LeggedRobotCfg
 from rsl_rl.datasets.motion_loader import AMPLoader
 import cv2
@@ -135,8 +136,6 @@ class LeggedRobot(BaseTask):
         self.init_done = False
         self._parse_cfg(self.cfg)
         super().__init__(self.cfg, sim_params, physics_engine, sim_device, headless)
-
-        self.resize_transform = torchvision.transforms.Resize((self.cfg.depth.resized[0], self.cfg.depth.resized[1]), interpolation=torchvision.transforms.InterpolationMode.BICUBIC)
 
         if not self.headless:
             self.set_camera(self.cfg.viewer.pos, self.cfg.viewer.lookat)
@@ -240,7 +239,6 @@ class LeggedRobot(BaseTask):
         # depth_image = self.crop_depth_image(depth_image)
         depth_image += self.cfg.depth.dis_noise * 2 * (torch.rand(1)-0.5)[0]
         depth_image = torch.clip(depth_image, -self.cfg.depth.far_clip, -self.cfg.depth.near_clip)
-        # depth_image = self.resize_transform(depth_image[None, :]).squeeze()
         depth_image = self.normalize_depth_image(depth_image)
         return depth_image
 
@@ -1248,7 +1246,9 @@ class LeggedRobot(BaseTask):
         tm_params.static_friction = self.cfg.terrain.static_friction
         tm_params.dynamic_friction = self.cfg.terrain.dynamic_friction
         tm_params.restitution = self.cfg.terrain.restitution
-        self.gym.add_triangle_mesh(self.sim, self.terrain.vertices.flatten(order='C'), self.terrain.triangles.flatten(order='C'), tm_params)
+        description = f"Loading terrain mesh ({tm_params.nb_vertices:,} vertices, {tm_params.nb_triangles:,} triangles)"
+        with waiting_progress(description):
+            self.gym.add_triangle_mesh(self.sim, self.terrain.vertices.flatten(order='C'), self.terrain.triangles.flatten(order='C'), tm_params)
         self.height_samples = torch.tensor(self.terrain.heightsamples).view(self.terrain.tot_rows, self.terrain.tot_cols).to(self.device)
         self.x_edge_mask = torch.tensor(self.terrain.x_edge_mask).view(self.terrain.tot_rows, self.terrain.tot_cols).to(self.device)
 

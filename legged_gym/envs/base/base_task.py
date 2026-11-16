@@ -73,6 +73,10 @@ class BaseTask():
         # optimization flags for pytorch JIT
         torch._C._jit_set_profiling_mode(False)
         torch._C._jit_set_profiling_executor(False)
+        # 禁用 TorchScript GPU 融合，避免新显卡（如 SM 12.0）触发
+        # NVRTC 的 invalid --gpu-architecture；普通 CUDA 算子仍在 GPU 上运行。
+        # torch._C._jit_override_can_fuse_on_gpu(False)
+        # torch._C._jit_set_texpr_fuser_enabled(False)
 
         # allocate buffers
         if cfg.env.include_history_steps is not None:

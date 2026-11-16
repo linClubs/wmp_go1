@@ -99,6 +99,10 @@ class TaskRegistry():
             env_cfg, _ = self.get_cfgs(name)
         # override cfg from args (if specified)
         env_cfg, _ = update_cfg_from_args(env_cfg, None, args)
+        # 使用最终环境数量配置全相机模式，避免命令行覆盖后相机数量不一致。
+        depth_predictor_cfg = getattr(self.train_cfgs[name], "depth_predictor", None)
+        if depth_predictor_cfg is not None and not getattr(depth_predictor_cfg, "use_depth_predictor", True):
+            env_cfg.depth.camera_num_envs = env_cfg.env.num_envs
         set_seed(env_cfg.seed)
         # parse sim params (convert to dict first)
         sim_params = {"sim": class_to_dict(env_cfg.sim)}

@@ -12,272 +12,129 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
-"""Utilities for 3D pose conversion."""
+# Copyright (c) 2026-2027 zh
+"""内容：使用 Torch 处理三维向量和姿态，四元数顺序为 [x, y, z, w]。"""
 import math
-import numpy as np
 
-from pybullet_utils import transformations
+import torch
 
-VECTOR3_0 = np.zeros(3, dtype=np.float64)
-VECTOR3_1 = np.ones(3, dtype=np.float64)
-VECTOR3_X = np.array([1, 0, 0], dtype=np.float64)
-VECTOR3_Y = np.array([0, 1, 0], dtype=np.float64)
-VECTOR3_Z = np.array([0, 0, 1], dtype=np.float64)
 
-# QUATERNION_IDENTITY is the multiplicative identity 1.0 + 0i + 0j + 0k.
-# When interpreted as a rotation, it is the identity rotation.
-QUATERNION_IDENTITY = np.array([0.0, 0.0, 0.0, 1.0], dtype=np.float64)
+VECTOR3_0 = torch.zeros(3, dtype=torch.float64)
+VECTOR3_1 = torch.ones(3, dtype=torch.float64)
+VECTOR3_X = torch.tensor([1., 0., 0.], dtype=torch.float64)
+VECTOR3_Y = torch.tensor([0., 1., 0.], dtype=torch.float64)
+VECTOR3_Z = torch.tensor([0., 0., 1.], dtype=torch.float64)
+QUATERNION_IDENTITY = torch.tensor([0., 0., 0., 1.], dtype=torch.float64)
+
+
+def as_float_tensor(value):
+    """保留浮点 Tensor 的类型及设备，其他输入转换为浮点 Tensor。"""
+    value = torch.as_tensor(value)
+    return value if value.is_floating_point() else value.to(torch.get_default_dtype())
 
 
 def Vector3RandomNormal(sigma, mu=VECTOR3_0):
-  """Returns a random 3D vector from a normal distribution.
-
-  Each component is selected independently from a normal distribution.
-
-  Args:
-    sigma: Scale (or stddev) of distribution for all variables.
-    mu: Mean of distribution for each variable.
-
-  Returns:
-    A 3D vector in a numpy array.
-  """
-
-  random_v3 = np.random.normal(scale=sigma, size=3) + mu
-  return random_v3
+    """生成各分量独立的三维正态随机向量。"""
+    mu = as_float_tensor(mu)
+    return torch.randn_like(mu) * torch.as_tensor(sigma, device=mu.device, dtype=mu.dtype) + mu
 
 
 def Vector3RandomUniform(low=VECTOR3_0, high=VECTOR3_1):
-  """Returns a 3D vector selected uniformly from the input box.
-
-  Args:
-    low: The min-value corner of the box.
-    high: The max-value corner of the box.
-
-  Returns:
-    A 3D vector in a numpy array.
-  """
-
-  random_x = np.random.uniform(low=low[0], high=high[0])
-  random_y = np.random.uniform(low=low[1], high=high[1])
-  random_z = np.random.uniform(low=low[2], high=high[2])
-  return np.array([random_x, random_y, random_z])
+    """在给定边界内生成三维均匀随机向量。"""
+    low = as_float_tensor(low)
+    high = torch.as_tensor(high, dtype=low.dtype, device=low.device)
+    return low + torch.rand_like(low) * (high - low)
 
 
 def Vector3RandomUnit():
-  """Returns a random 3D vector with unit length.
-
-  Generates a 3D vector selected uniformly from the unit sphere.
-
-  Returns:
-    A normalized 3D vector in a numpy array.
-  """
-  longitude = np.random.uniform(low=-math.pi, high=math.pi)
-  sin_latitude = np.random.uniform(low=-1.0, high=1.0)
-  cos_latitude = math.sqrt(1.0 - sin_latitude * sin_latitude)
-  x = math.cos(longitude) * cos_latitude
-  y = math.sin(longitude) * cos_latitude
-  z = sin_latitude
-  return np.array([x, y, z], dtype=np.float64)
+    """在单位球面上均匀生成三维单位向量。"""
+    vector = torch.randn(3, dtype=torch.float64)
+    return vector / torch.linalg.vector_norm(vector)
 
 
 def QuaternionNormalize(q):
-  """Normalizes the quaternion to length 1.
-
-  Divides the quaternion by its magnitude.  If the magnitude is too
-  small, returns the quaternion identity value (1.0).
-
-  Args:
-    q: A quaternion to be normalized.
-
-  Raises:
-    ValueError: If input quaternion has length near zero.
-
-  Returns:
-    A quaternion with magnitude 1 in a numpy array [x, y, z, w].
-
-  """
-  q_norm = np.linalg.norm(q)
-  if np.isclose(q_norm, 0.0):
-    raise ValueError(
-        'Quaternion may not be zero in QuaternionNormalize: |q| = %f, q = %s' %
-        (q_norm, q))
-  return q / q_norm
+    """归一化单个或批量四元数，拒绝零长度输入。"""
+    q = as_float_tensor(q)
+    norm = torch.linalg.vector_norm(q, dim=-1, keepdim=True)
+    if torch.any(torch.isclose(norm, torch.zeros_like(norm))):
+        raise ValueError("Quaternion must have nonzero length")
+    return q / norm
 
 
 def QuaternionFromAxisAngle(axis, angle):
-  """Returns a quaternion that generates the given axis-angle rotation.
-
-  Returns the quaternion: sin(angle/2) * axis + cos(angle/2).
-
-  Args:
-    axis: Axis of rotation, a 3D vector in a numpy array.
-    angle: The angle of rotation (radians).
-
-  Raises:
-    ValueError: If input axis is not a normalizable 3D vector.
-
-  Returns:
-    A unit quaternion in a numpy array.
-
-  """
-  if len(axis) != 3:
-    raise ValueError('Axis vector should have three components: %s' % axis)
-  axis_norm = np.linalg.norm(axis)
-  if np.isclose(axis_norm, 0.0):
-    raise ValueError('Axis vector may not have zero length: |v| = %f, v = %s' %
-                     (axis_norm, axis))
-  half_angle = angle * 0.5
-  q = np.zeros(4, dtype=np.float64)
-  q[0:3] = axis
-  q[0:3] *= math.sin(half_angle) / axis_norm
-  q[3] = math.cos(half_angle)
-  return q
+    """将旋转轴和弧度角转换为单位四元数，支持批量广播。"""
+    axis = as_float_tensor(axis)
+    if axis.shape[-1] != 3:
+        raise ValueError("Axis must have three components")
+    norm = torch.linalg.vector_norm(axis, dim=-1, keepdim=True)
+    if torch.any(torch.isclose(norm, torch.zeros_like(norm))):
+        raise ValueError("Axis must have nonzero length")
+    half_angle = torch.as_tensor(angle, dtype=axis.dtype, device=axis.device) * 0.5
+    xyz, w = torch.broadcast_tensors(axis / norm * torch.sin(half_angle)[..., None], torch.cos(half_angle)[..., None])
+    return torch.cat((xyz, w[..., :1]), dim=-1)
 
 
 def QuaternionToAxisAngle(quat, default_axis=VECTOR3_Z, direction_axis=None):
-  """Calculates axis and angle of rotation performed by a quaternion.
-
-  Calculates the axis and angle of the rotation performed by the quaternion.
-  The quaternion should have four values and be normalized.
-
-  Args:
-    quat: Unit quaternion in a numpy array.
-    default_axis: 3D vector axis used if the rotation is near to zero. Without
-      this default, small rotations would result in an exception.  It is
-      reasonable to use a default axis for tiny rotations, because zero angle
-      rotations about any axis are equivalent.
-    direction_axis: Used to disambiguate rotation directions.  If the
-      direction_axis is specified, the axis of the rotation will be chosen such
-      that its inner product with the direction_axis is non-negative.
-
-  Raises:
-    ValueError: If quat is not a normalized quaternion.
-
-  Returns:
-    axis: Axis of rotation.
-    angle: Angle in radians.
-  """
-  if len(quat) != 4:
-    raise ValueError(
-        'Quaternion should have four components [x, y, z, w]: %s' % quat)
-  if not np.isclose(1.0, np.linalg.norm(quat)):
-    raise ValueError('Quaternion should have unit length: |q| = %f, q = %s' %
-                     (np.linalg.norm(quat), quat))
-  axis = quat[:3].copy()
-  axis_norm = np.linalg.norm(axis)
-  min_axis_norm = 1e-8
-  if axis_norm < min_axis_norm:
-    axis = default_axis
-    if len(default_axis) != 3:
-      raise ValueError('Axis vector should have three components: %s' % axis)
-    if not np.isclose(np.linalg.norm(axis), 1.0):
-      raise ValueError('Axis vector should have unit length: |v| = %f, v = %s' %
-                       (np.linalg.norm(axis), axis))
-  else:
-    axis /= axis_norm
-  sin_half_angle = axis_norm
-  if direction_axis is not None and np.inner(axis, direction_axis) < 0:
-    sin_half_angle = -sin_half_angle
-    axis = -axis
-  cos_half_angle = quat[3]
-  half_angle = math.atan2(sin_half_angle, cos_half_angle)
-  angle = half_angle * 2
-  return axis, angle
+    """将单位四元数转换为旋转轴与弧度角，支持批量输入。"""
+    quat = as_float_tensor(quat)
+    if quat.shape[-1] != 4:
+        raise ValueError("Quaternion must have four components")
+    norm = torch.linalg.vector_norm(quat, dim=-1)
+    if not torch.allclose(norm, torch.ones_like(norm)):
+        raise ValueError("Quaternion must have unit length")
+    default_axis = torch.as_tensor(default_axis, dtype=quat.dtype, device=quat.device)
+    if default_axis.shape[-1] != 3 or not torch.allclose(
+        torch.linalg.vector_norm(default_axis, dim=-1), torch.ones_like(default_axis[..., 0])
+    ):
+        raise ValueError("Default axis must be a unit vector")
+    axis_norm = torch.linalg.vector_norm(quat[..., :3], dim=-1, keepdim=True)
+    axis = torch.where(axis_norm < 1e-8, default_axis, quat[..., :3] / axis_norm.clamp_min(1e-8))
+    sin_half_angle = axis_norm[..., 0]
+    if direction_axis is not None:
+        direction_axis = torch.as_tensor(direction_axis, dtype=quat.dtype, device=quat.device)
+        flip = (axis * direction_axis).sum(dim=-1) < 0
+        axis = torch.where(flip[..., None], -axis, axis)
+        sin_half_angle = torch.where(flip, -sin_half_angle, sin_half_angle)
+    return axis, 2 * torch.atan2(sin_half_angle, quat[..., 3])
 
 
 def QuaternionRandomRotation(max_angle=math.pi):
-  """Creates a random small rotation around a random axis.
+    """围绕随机单位轴生成角度位于给定范围的旋转。"""
+    return QuaternionFromAxisAngle(Vector3RandomUnit(), torch.rand((), dtype=torch.float64) * max_angle)
 
-  Generates a small rotation with the axis vector selected uniformly
-  from the unit sphere and an angle selected from a uniform
-  distribution over [0, max_angle].
 
-  If the max_angle is not specified, the rotation should be selected
-  uniformly over all possible rotation angles.
+def QuaternionMultiply(q0, q1):
+    """计算 Hamilton 四元数乘积，支持批量广播。"""
+    q0 = as_float_tensor(q0)
+    q1 = torch.as_tensor(q1, dtype=q0.dtype, device=q0.device)
+    q0, q1 = torch.broadcast_tensors(q0, q1)
+    v0, v1 = q0[..., :3], q1[..., :3]
+    xyz = q0[..., 3:] * v1 + q1[..., 3:] * v0 + torch.cross(v0, v1, dim=-1)
+    w = q0[..., 3:] * q1[..., 3:] - (v0 * v1).sum(dim=-1, keepdim=True)
+    return torch.cat((xyz, w), dim=-1)
 
-  Args:
-    max_angle: The maximum angle of rotation (radians).
 
-  Returns:
-    A unit quaternion in a numpy array.
-
-  """
-
-  angle = np.random.uniform(low=0, high=max_angle)
-  axis = Vector3RandomUnit()
-  return QuaternionFromAxisAngle(axis, angle)
+def QuaternionInverse(quat):
+    """计算非零四元数的逆，支持非单位四元数。"""
+    quat = as_float_tensor(quat)
+    norm_squared = (quat * quat).sum(dim=-1, keepdim=True)
+    if torch.any(norm_squared == 0):
+        raise ValueError("Quaternion must have nonzero length")
+    return torch.cat((-quat[..., :3], quat[..., 3:]), dim=-1) / norm_squared
 
 
 def QuaternionRotatePoint(point, quat):
-  """Performs a rotation by quaternion.
-
-  Rotate the point by the quaternion using quaternion multiplication,
-  (q * p * q^-1), without constructing the rotation matrix.
-
-  Args:
-    point: The point to be rotated.
-    quat: The rotation represented as a quaternion [x, y, z, w].
-
-  Returns:
-    A 3D vector in a numpy array.
-  """
-
-  q_point = np.array([point[0], point[1], point[2], 0.0])
-  quat_inverse = transformations.quaternion_inverse(quat)
-  q_point_rotated = transformations.quaternion_multiply(
-      transformations.quaternion_multiply(quat, q_point), quat_inverse)
-  return q_point_rotated[:3]
+    """使用 q * p * q逆旋转三维向量，支持批量广播。"""
+    quat = as_float_tensor(quat)
+    point = torch.as_tensor(point, dtype=quat.dtype, device=quat.device)
+    q_point = torch.cat((point, torch.zeros_like(point[..., :1])), dim=-1)
+    return QuaternionMultiply(QuaternionMultiply(quat, q_point), QuaternionInverse(quat))[..., :3]
 
 
 def IsRotationMatrix(m):
-  """Returns true if the 3x3 submatrix represents a rotation.
-
-  Args:
-    m: A transformation matrix.
-
-  Raises:
-    ValueError: If input is not a matrix of size at least 3x3.
-
-  Returns:
-    True if the 3x3 submatrix is a rotation (orthogonal).
-  """
-  if len(m.shape) != 2 or m.shape[0] < 3 or m.shape[1] < 3:
-    raise ValueError('Matrix should be 3x3 or 4x4: %s\n %s' % (m.shape, m))
-  rot = m[:3, :3]
-  eye = np.matmul(rot, np.transpose(rot))
-  return np.isclose(eye, np.identity(3), atol=1e-4).all()
-
-# def ZAxisAlignedRobotPoseTool(robot_pose_tool):
-#   """Returns the current gripper pose rotated for alignment with the z-axis.
-
-#   Args:
-#     robot_pose_tool: a pose3d.Pose3d() instance.
-
-#   Returns:
-#     An instance of pose.Transform representing the current gripper pose
-#     rotated for alignment with the z-axis.
-#   """
-#   # Align the current pose to the z-axis.
-#   robot_pose_tool.quaternion = transformations.quaternion_multiply(
-#       RotationBetween(
-#           robot_pose_tool.matrix4x4[0:3, 0:3].dot(np.array([0, 0, 1])),
-#           np.array([0.0, 0.0, -1.0])), robot_pose_tool.quaternion)
-#   return robot_pose_tool
-
-# def RotationBetween(a_translation_b, a_translation_c):
-#   """Computes the rotation from one vector to another.
-
-#   The computed rotation has the property that:
-
-#     a_translation_c = a_rotation_b_to_c * a_translation_b
-
-#   Args:
-#     a_translation_b: vec3, vector to rotate from
-#     a_translation_c: vec3, vector to rotate to
-
-#   Returns:
-#     a_rotation_b_to_c: new Orientation
-#   """
-#   rotation = rotation3.Rotation3.rotation_between(
-#       a_translation_b, a_translation_c, err_msg='RotationBetween')
-#   return rotation.quaternion.xyzw
+    """检查矩阵左上角的 3×3 部分是否正交，保持原有判定语义。"""
+    m = as_float_tensor(m)
+    if m.ndim != 2 or m.shape[0] < 3 or m.shape[1] < 3:
+        raise ValueError("Matrix must be at least 3x3")
+    rot = m[:3, :3]
+    return bool(torch.allclose(rot @ rot.T, torch.eye(3, dtype=m.dtype, device=m.device), atol=1e-4))
